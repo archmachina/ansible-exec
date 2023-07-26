@@ -42,7 +42,25 @@ case "$COMMAND" in
     ;;
   ansible-playbook)
     if ! ansible_playbook "$@" ; then
-      echo "Failed to run ansible-playbook"
+      echo "Failed to run ansible_playbook"
+      exit 1
+    fi
+    ;;
+  ansible-setup)
+    if ! ansible_setup "$@" ; then
+      echo "Failed to run ansible_setup"
+      exit 1
+    fi
+    ;;
+  ansible_playbook)
+    if ! ansible_playbook "$@" ; then
+      echo "Failed to run ansible_playbook"
+      exit 1
+    fi
+    ;;
+  ansible_setup)
+    if ! ansible_setup "$@" ; then
+      echo "Failed to run ansible_setup"
       exit 1
     fi
     ;;

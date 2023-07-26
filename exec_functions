@@ -10,7 +10,7 @@ SEMVER_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]
 function github_release() {
   GITHUB_GENERATE_NOTES='false'
 
-  while getopts "o:r:a:t:d:p:n:g" opt ; do
+  while getopts "o:r:a:t:d:p:n:gh" opt ; do
     case "${opt}" in
       o)
         GITHUB_OWNER="${OPTARG}"
@@ -37,6 +37,22 @@ function github_release() {
         GITHUB_GENERATE_NOTES='true'
         ;;
       h)
+        cat <<_EOF_
+Usage: github_release
+
+-o owner                GitHub owner/organisation
+-r repo_name            GitHub repository name
+-a auth_token           Authentication token for GitHub
+-t tag_name             Git tag name
+-d (true|false)         GitHub draft release
+-p (true|false)         GitHub prerelease
+-n release_name         Release name
+-g (true|false)         Generate notes
+_EOF_
+        ;;
+      *)
+        echo "Unknown option ($opt)"
+        return 1
         ;;
     esac
   done
@@ -112,9 +128,9 @@ _EOF_
 }
 
 function assert() {
-  echo "Asserting: $@" >&2
+  echo "Asserting: $*" >&2
   if ! "$@" ; then
-    echo "assertion ($@) failed" >&2
+    echo "assertion ($*) failed" >&2
     exit 1
   fi
 
@@ -125,9 +141,9 @@ function assert_msg() {
   MSG="$1"
   shift
 
-  echo "Asserting: ($MSG) $@" >&2
+  echo "Asserting: ($MSG) $*" >&2
   if ! "$@" ; then
-    echo "assertion ($MSG) ($@) failed" >&2
+    echo "assertion ($MSG) ($*) failed" >&2
     exit 1
   fi
 
@@ -177,13 +193,13 @@ function semver_extract() {
   if [[ "$VER" =~ $SEMVER_REGEX ]] ; then
     # Match for regex
 
-    SEMVER_ORIG="${ORIG}"
-    SEMVER_FULL="${BASH_REMATCH[0]}"
-    SEMVER_MAJOR="${BASH_REMATCH[1]}"
-    SEMVER_MINOR="${BASH_REMATCH[2]}"
-    SEMVER_PATCH="${BASH_REMATCH[3]}"
-    SEMVER_PRERELEASE="${BASH_REMATCH[5]}"
-    SEMVER_BUILDMETA="${BASH_REMATCH[10]}"
+    export SEMVER_ORIG="${ORIG}"
+    export SEMVER_FULL="${BASH_REMATCH[0]}"
+    export SEMVER_MAJOR="${BASH_REMATCH[1]}"
+    export SEMVER_MINOR="${BASH_REMATCH[2]}"
+    export SEMVER_PATCH="${BASH_REMATCH[3]}"
+    export SEMVER_PRERELEASE="${BASH_REMATCH[5]}"
+    export SEMVER_BUILDMETA="${BASH_REMATCH[10]}"
 
     # Make sure we have content for the mandatory components
     if [ "${SEMVER_FULL}" == "" ] || [ "${SEMVER_MAJOR}" == "" ] || [ "${SEMVER_MINOR}" == "" ] || [ "${SEMVER_PATCH}" == "" ] ; then
@@ -357,92 +373,197 @@ ${TARGET_COMMITS}
   return 0
 }
 
-function ansible_playbook() {
-  # Error handling
-  set -e
+function ansible_setup() {
+  PLAYBOOK_DIR="$1"
 
-  # Determine playbook and working directory
-  PLAYBOOK=$(readlink -f "$1")
-  shift
-  WORKDIR=$(dirname "${PLAYBOOK}")
-  ORIGDIR=$(pwd)
-
-  # Make sure the playbook exists before we start doing any work
-  if [ ! -f "${PLAYBOOK}" ] ; then
-    echo "Playbook does not exist: ${PLAYBOOK}"
+  # Check we have a directory to work with
+  if [ "$PLAYBOOK_DIR" == "" ] ; then
+    echo "Ansible playbook directory not supplied"
     return 1
   fi
 
-  # Change to workdir temporarily - error handling by 'set -e'
-  cd "${WORKDIR}"
+  if ! PLAYBOOK_DIR=$(readlink -f "$PLAYBOOK_DIR") ; then
+    echo "Could not resolve playbook directory to full path"
+    return 1
+  fi
 
-  # Ansible environment vars config
+  if [ ! -d "$PLAYBOOK_DIR" ] ; then
+    echo "Ansible playbook directory does not exist or is not a directory"
+    return 1
+  fi
+
   echo ""
-  echo "Setting ansible environment vars"
+  echo "Ansible environment setup: $PLAYBOOK_DIR"
   echo "----------------"
+  echo ""
 
-  export ANSIBLE_CONFIG="${WORKDIR}/ansible.cfg"
+  # Temporarily move in to ansible playbook dir
+  STARTDIR=$(pwd)
+  if ! cd "$PLAYBOOK_DIR" ; then
+    echo "Could not change in to ansible playbook directory: $PLAYBOOK_DIR"
+    return 1
+  fi
+
+  # Configure ANSIBLE_HOME
+  export ANSIBLE_HOME="${PLAYBOOK_DIR}/.ansible"
+  if [ ! -d "${ANSIBLE_HOME}" ] ; then
+    echo "ANSIBLE_HOME ($ANSIBLE_HOME) does not exist. Creating."
+    if ! mkdir -p "${ANSIBLE_HOME}" ; then
+      echo "Failed to create ANSIBLE_HOME"
+      return 1
+    fi
+  fi
+
+  # Configure ANSIBLE_CONFIG
+  export ANSIBLE_CONFIG="${PLAYBOOK_DIR}/ansible.cfg"
   if [ ! -f "${ANSIBLE_CONFIG}" ] ; then
     echo "Missing ansible.cfg file: ${ANSIBLE_CONFIG}"
     return 1
   fi
 
-  export ANSIBLE_HOME="${WORKDIR}/.ansible"
-  [ ! -d "${ANSIBLE_HOME}" ] && mkdir -p "${ANSIBLE_HOME}"
-
-  echo "ANSIBLE_CONFIG: ${ANSIBLE_CONFIG}"
-  echo "ANSIBLE_HOME: ${ANSIBLE_HOME}"
-  echo ""
-
-  ########
-  # Set up environment
-
   # Set up venv for ansible
-  echo ""
-  echo "Configuring python virtualenv"
-  echo "----------------"
-  python3 -m venv env
+  if ! python3 -m venv "${PLAYBOOK_DIR}/env" ; then
+    echo "Failed to set up python3 virtual environment in ${PLAYBOOK_DIR}/env"
+    return 1
+  fi
+
+  # Activate the python environment
   # shellcheck disable=SC1091
-  source ./env/bin/activate
+  if ! source "${PLAYBOOK_DIR}/env/bin/activate" ; then
+    echo "Failed to source python environment from ${PLAYBOOK_DIR}/env/bin/activate"
+    return 1
+  fi
+
+  if [ ${ANSIBLE_INSTALL_DEPS:-1} -eq 1 ] ; then
+    echo "Installing dependencies for ansible environment"
+
+    # Pip configuration for the virtual environment
+    echo ""
+    echo "Configuring pip"
+    echo "----------------"
+    if ! python3 -m pip install --upgrade pip ; then
+      echo "Failed to perform pip install"
+      return 1
+    fi
+
+    # Install python dependencies
+    echo ""
+    echo "Installing python dependencies"
+    echo "----------------"
+    if ! python3 -m pip install -r requirements.txt ; then
+      echo "Failed to perform pip install from requirements.txt"
+      return 1
+    fi
+
+    if ! python3 -m pip list ; then
+      echo "Failed to perform pip list"
+      return 1
+    fi
+
+    # Install any ansible collections required
+    echo ""
+    echo "Installing ansible collections"
+    echo "----------------"
+    if [ ! -d "${ANSIBLE_HOME}/collections" ] ; then
+      echo "Ansible collections directory does not exist. Creating."
+      if ! mkdir -p "${ANSIBLE_HOME}/collections" ; then
+        echo "Failed to create ansible collections directory"
+        return 1
+      fi
+    fi
+
+    echo "Installing ansible galaxy collections"
+    if ! ansible-galaxy collection install -r requirements.yml ; then
+      echo "Failed to perform ansible galaxy collection install"
+      return 1
+    fi
+
+    if ! ansible-galaxy collection list ; then
+      echo "Failed to perform ansible galaxy collection list"
+      return 1
+    fi
+
+    # Install any ansible roles required
+    echo ""
+    echo "Installing ansible roles"
+    echo "----------------"
+    if [ ! -d "${ANSIBLE_HOME}/roles" ] ; then
+      echo "Ansible roles directory does not exist. Creating."
+      if ! mkdir -p "${ANSIBLE_HOME}/roles" ; then
+        echo "Failed to create ansible roles directory"
+        return 1
+      fi
+    fi
+
+    echo "Installing ansible galaxy roles"
+    if ! ansible-galaxy role install -r requirements.yml ; then
+      echo "Failed to perform ansible roles install from requirements.yml"
+      return 1
+    fi
+
+    if ! ansible-galaxy role list ; then
+      echo "Failed to perform ansible galaxy role list"
+      return 1
+    fi
+  fi
+
+  # Move back to the starting directory
+  if ! cd "$STARTDIR" ; then
+    echo "Could not move back to the starting directory ($STARTDIR)"
+    return 1
+  fi
+}
+
+function ansible_playbook() {
+
+  PLAYBOOK="$1"
+  shift
+
+  # Determine playbook file and playbook directory
+  if [ "$PLAYBOOK" == "" ] ; then
+    echo "Ansible playbook not supplied as argument"
+    return 1
+  fi
+
+  if ! PLAYBOOK=$(readlink -f "$PLAYBOOK") ; then
+    echo "Could not resolve playbook to full path"
+    return 1
+  fi
+
+  if [ ! -f "$PLAYBOOK" ] ; then
+    echo "Playbook does not exist or is not a file"
+    return 1
+  fi
+
+  if ! PLAYBOOK_DIR=$(dirname "${PLAYBOOK}") ; then
+    echo "Could not determine playbook directory"
+    return 1
+  fi
 
   echo ""
-  echo "Configuring pip"
+  echo "Ansible playbook: $PLAYBOOK"
   echo "----------------"
-  python3 -m pip install --upgrade pip
-  python3 -m pip install -r requirements.txt
-  python3 -m pip list
-
-  # Resolve ansible requirements
   echo ""
-  echo "Installing ansible collections"
-  echo "----------------"
-  [ ! -d "${ANSIBLE_HOME}/collections" ] && mkdir -p "${ANSIBLE_HOME}/collections"
-  ansible-galaxy collection install -r requirements.yml
-  ansible-galaxy collection list
 
-  echo ""
-  echo "Installing ansible roles"
-  echo "----------------"
-  [ ! -d "${ANSIBLE_HOME}/roles" ] && mkdir -p "${ANSIBLE_HOME}/roles"
-  ansible-galaxy role install -r requirements.yml
-  ansible-galaxy role list
+  # Set up ansible environment
+  if ! ansible_setup "$PLAYBOOK_DIR" ; then
+    echo "Failed to resolve ansible dependencies"
+    return 1
+  fi
 
-  ########
-  # Start ansible playbook
-
-  # Display run information
+  # Display runtime information
   echo ""
   echo "Ansible runtime information"
   echo "----------------"
+  echo "ANSIBLE_CONFIG: ${ANSIBLE_CONFIG}"
+  echo "ANSIBLE_HOME: ${ANSIBLE_HOME}"
   echo "Ansible Install Location: $(which ansible-playbook)"
   echo ""
   echo "Ansible-Playbook Version: "
   ansible-playbook --version
   echo ""
 
-  # Move back to origin directory before starting the playbook
-  cd "${ORIGDIR}"
-
+  # Start ansible playbook
   echo "Starting ansible playbook"
   echo "----------------"
   ansible-playbook "${PLAYBOOK}" "$@"
