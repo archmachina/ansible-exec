@@ -7,6 +7,52 @@ set -o pipefail
 
 SEMVER_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
 
+function run_dir()
+{
+  # Determine the starting directory
+  BASE="$1"
+  shift
+  if [ "$BASE" == "" ] ; then
+    echo "Missing base directory"
+    return 1
+  fi
+
+  # Find directories to process
+  if ! DIRS=$(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name _run_\* -exec readlink -f {} \; | sort) ; then
+    echo "Failed to list run directories"
+    return 1
+  fi
+
+  # Save our initial directory
+  INITIAL_DIR=$(pwd)
+
+  # Process each directory
+  for DIR in $DIRS ; do
+    echo "Processing directory: $DIR"
+
+    # Start from that directory
+    if ! cd "$DIR" ; then
+      echo "Could not change in to directory: $DIR"
+      cd "$INITIAL_DIR"
+      return 1
+    fi
+
+    # Execute the run file
+    if ! ./run "$@" ; then
+      echo "Could not execute the run file from directory or run failed: $DIR"
+      cd "$INITIAL_DIR"
+      return 1
+    fi
+  done
+
+  if ! cd "$INITIAL_DIR" ; then
+    echo "Could not change back to original directory: $INITIAL_DIR"
+    return 1
+  fi
+
+  return 0
+}
+
 function docker_build_sha()
 {
   DOCKERFILE="$1"

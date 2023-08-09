@@ -22,6 +22,12 @@ COMMAND="$1"
 shift
 
 case "$COMMAND" in
+  run_dir)
+    if ! run_dir "$@" ; then
+      echo "Failed to execute run_dir"
+      exit 1
+    fi
+    ;;
   github_release)
     if ! github_release "$@" ; then
       echo "Failed to perform github_release"
