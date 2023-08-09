@@ -643,6 +643,7 @@ function ansible_playbook() {
   # Start ansible playbook
   echo "Starting ansible playbook"
   echo "----------------"
+  echo "Ansible Arguments: $@"
   ansible-playbook "${PLAYBOOK}" "$@"
 
   return $?
