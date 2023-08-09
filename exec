@@ -22,9 +22,15 @@ COMMAND="$1"
 shift
 
 case "$COMMAND" in
-  run_dir)
-    if ! run_dir "$@" ; then
-      echo "Failed to execute run_dir"
+  run_dir_dockerfile)
+    if ! run_dir_dockerfile "$@" ; then
+      echo "Failed to execute run_dir_dockerfile"
+      exit 1
+    fi
+    ;;
+  run_dirs_docker)
+    if ! run_dirs_docker "$@" ; then
+      echo "Failed to execute run_dirs_docker"
       exit 1
     fi
     ;;

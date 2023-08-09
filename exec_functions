@@ -7,7 +7,135 @@ set -o pipefail
 
 SEMVER_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
 
-function run_dir()
+function run_dir_dockerfile()
+{
+  # Determine the starting directory
+  DIR="$1"
+  shift
+  if [ "$DIR" == "" ] ; then
+    echo "Missing directory argument for run_dir_dockerfile"
+    return 1
+  fi
+
+  # Determine action for this run (apply or diff)
+  ACTION="$1"
+  shift
+  if [ "$ACTION" == "" ] ; then
+    echo "Missing action argument for run_dir_dockerfile"
+    return 1
+  fi
+
+  # Save the initial directory
+  INITIAL_DIR=$(pwd)
+
+  # Change to the directory with the Dockerfile
+  if ! cd "$DIR" ; then
+    echo "Could not change to directory: $DIR"
+    return 1
+  fi
+
+  # Capture build options
+  if ! BUILD_OPTS=$(sed -ne 's/^[[:space:]]*#[[:space:]]*BUILD_OPTS[[:space:]]*//p' Dockerfile) ; then
+    echo "Could not read build options from Dockerfile"
+    cd "$INITIAL_DIR"
+    return 1
+  fi
+
+  # Process build options
+  DOCKER_BUILD="docker build -q -f Dockerfile"
+  while read -r LINE ; do
+    DOCKER_BUILD="$DOCKER_BUILD $LINE"
+  done < <(echo "$BUILD_OPTS")
+  DOCKER_BUILD="$DOCKER_BUILD ."
+
+  # Run docker build
+  echo "Docker build: $DOCKER_BUILD"
+  if ! SHA=$(sh -c "$DOCKER_BUILD") ; then
+    echo "Failed to perform docker build"
+    cd "$INITIAL_DIR"
+    return 1
+  fi
+
+  # Capture run options
+  if ! RUN_OPTS=$(sed -ne 's/^[[:space:]]*#[[:space:]]*RUN_OPTS[[:space:]]*//p' Dockerfile) ; then
+    echo "Could not read run options from Dockerfile"
+    cd "$INITIAL_DIR"
+    return 1
+  fi
+
+  # Process run options
+  DOCKER_RUN="docker run --rm -t"
+  while read -r LINE ; do
+    DOCKER_RUN="$DOCKER_RUN $LINE"
+  done < <(echo "$RUN_OPTS")
+
+  # Add the SHA image to the command
+  DOCKER_RUN="$DOCKER_RUN $SHA"
+
+  # Capture image options
+  if ! IMAGE_OPTS=$(sed -ne 's/^[[:space:]]*#[[:space:]]*IMAGE_OPTS[[:space:]]*//p' Dockerfile) ; then
+    echo "Could not read image options from Dockerfile"
+    cd "$INITIAL_DIR"
+    return 1
+  fi
+
+  # Process image options
+  while read -r LINE ; do
+    DOCKER_RUN="$DOCKER_RUN $LINE"
+  done < <(echo "$IMAGE_OPTS")
+
+  case "$ACTION" in
+    apply)
+      # Capture apply options
+      if ! APPLY_OPTS=$(sed -ne 's/^[[:space:]]*#[[:space:]]*APPLY_OPTS[[:space:]]*//p' Dockerfile) ; then
+        echo "Could not read apply options from Dockerfile"
+        cd "$INITIAL_DIR"
+        return 1
+      fi
+
+      # Process apply options
+      while read -r LINE ; do
+        DOCKER_RUN="$DOCKER_RUN $LINE"
+      done < <(echo "$APPLY_OPTS")
+      ;;
+    diff)
+      # Capture diff options
+      if ! DIFF_OPTS=$(sed -ne 's/^[[:space:]]*#[[:space:]]*DIFF_OPTS[[:space:]]*//p' Dockerfile) ; then
+        echo "Could not read apply options from Dockerfile"
+        cd "$INITIAL_DIR"
+        return 1
+      fi
+
+      # Process diff options
+      while read -r LINE ; do
+        DOCKER_RUN="$DOCKER_RUN $LINE"
+      done < <(echo "$DIFF_OPTS")
+      ;;
+    *)
+      echo "Invalid action: $ACTION"
+      cd "$INITIAL_DIR"
+      return 1
+      ;;
+  esac
+
+  # Run docker image
+  echo "Docker run: $DOCKER_RUN"
+  if ! sh -c "$DOCKER_RUN" ; then
+    echo "Failed to run docker image or container failed"
+    cd "$INITIAL_DIR"
+    return 1
+  fi
+
+  # Change back to initial directory
+  if ! cd "$INITIAL_DIR" ; then
+    echo "Failed to change back to initial directory: $INITIAL_DIR"
+    return 1
+  fi
+
+  return 0
+}
+
+function run_dirs_docker()
 {
   # Determine the starting directory
   BASE="$1"
@@ -17,38 +145,29 @@ function run_dir()
     return 1
   fi
 
+  # Determine the action
+  ACTION="$1"
+  shift
+  if [ "$ACTION" == "" ] ; then
+    echo "Missing action"
+    return 1
+  fi
+
   # Find directories to process
   if ! DIRS=$(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name _run_\* -exec readlink -f {} \; | sort) ; then
     echo "Failed to list run directories"
     return 1
   fi
 
-  # Save our initial directory
-  INITIAL_DIR=$(pwd)
-
   # Process each directory
   for DIR in $DIRS ; do
     echo "Processing directory: $DIR"
 
-    # Start from that directory
-    if ! cd "$DIR" ; then
-      echo "Could not change in to directory: $DIR"
-      cd "$INITIAL_DIR"
-      return 1
-    fi
-
-    # Execute the run file
-    if ! ./run "$@" ; then
-      echo "Could not execute the run file from directory or run failed: $DIR"
-      cd "$INITIAL_DIR"
+    if ! run_dir_dockerfile "$DIR" "$ACTION" ; then
+      echo "Failed to run dockerfile for directory: $DIR"
       return 1
     fi
   done
-
-  if ! cd "$INITIAL_DIR" ; then
-    echo "Could not change back to original directory: $INITIAL_DIR"
-    return 1
-  fi
 
   return 0
 }
